@@ -31,3 +31,8 @@ htmlcov/
 
 # Jupyter notebooks
 .ipynb_checkpoints/
+.idea/
+.vscode/
+ailivetradproject-493118-b0d73313d507.json
+trading doc.docx
+.env
