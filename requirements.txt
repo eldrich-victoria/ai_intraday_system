@@ -1,15 +1,21 @@
-pandas>=2.0.0
-numpy>=1.24.0
-gspread>=6.0.0
-google-auth>=2.0.0
-yfinance>=0.2.40
-pandas-ta>=0.3.14b
-scikit-learn>=1.3.0
-xgboost>=2.0.0
-streamlit>=1.28.0
-matplotlib>=3.7.0
-sqlalchemy>=2.0.0
-python-telegram-bot>=20.0
-python-dotenv>=1.0.0
-schedule>=1.2.0
-joblib>=1.3.0
+# Core dependencies
+pandas>=2.0.0,<3.0.0
+numpy>=1.24.0,<3.0.0
+gspread>=6.0.0,<7.0.0
+google-auth>=2.0.0,<3.0.0
+yfinance>=0.2.40,<1.0.0
+ta>=0.11.0,<1.0.0
+scikit-learn>=1.3.0,<2.0.0
+streamlit>=1.28.0,<2.0.0
+matplotlib>=3.7.0,<4.0.0
+python-telegram-bot>=20.0,<22.0
+python-dotenv>=1.0.0,<2.0.0
+schedule>=1.2.0,<2.0.0
+joblib>=1.3.0,<2.0.0
+
+# Dashboard auto-refresh
+streamlit-autorefresh>=1.0.0,<2.0.0
+
+# Dev / test (install separately or via pip install -r requirements.txt)
+pytest>=7.0.0,<9.0.0
+ruff>=0.4.0,<1.0.0

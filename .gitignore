@@ -1,11 +1,33 @@
+# Environment variables
+.env
+
+# Google credentials
+*.json
+
+# Python cache
 __pycache__/
-*.py[cod]
-.venv/
+*.pyc
+*.pyo
+
+# Virtual environments
 venv/
-.env.backup
-*.log
+.venv/
+
+# Database and models
+data/*.db
+models/*.pkl
+
+# Logs
+logs/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Test and coverage artifacts
 .pytest_cache/
-.idea/
-.vscode/
-ailivetradproject-493118-b0d73313d507.json
-trading doc.docx
+coverage.xml
+htmlcov/
+
+# Jupyter notebooks
+.ipynb_checkpoints/

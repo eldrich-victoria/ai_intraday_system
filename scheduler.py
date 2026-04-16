@@ -1,15 +1,23 @@
 # -*- coding: utf-8 -*-
 """
 Main orchestrator: fetch signals, ML validation hooks, paper trades, metrics.
-Runs a loop with ~60s sleep during NSE hours (IST, Mon–Fri 09:00–16:00).
+Runs a loop with ~60s sleep during NSE hours (IST, Mon-Fri 09:00-16:00).
+
+Usage:
+    python scheduler.py           # Continuous loop (local / cloud VM)
+    python scheduler.py --once    # Single cycle (GitHub Actions / cron)
+    python scheduler.py --retrain # Force model retrain and exit
 """
 
+import argparse
 import logging
 import os
 import sys
 import time
-from datetime import datetime, time as dtime
+from datetime import datetime
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import schedule
 
@@ -18,10 +26,20 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from src import alerts
-from src.config import INITIAL_CAPITAL, IST, LOG_LEVEL, MODEL_PATH, ensure_directories
+from src.config import (
+    INITIAL_CAPITAL,
+    IST,
+    LOCK_FILE,
+    LOG_DIR,
+    LOG_LEVEL,
+    MODEL_PATH,
+    NSE_HOLIDAYS,
+    ensure_directories,
+)
+from src.db import ensure_database, get_connection
 from src.dummy_trader import (
     create_trades_for_validated_signals,
-    ensure_database,
+    force_close_eod,
     get_virtual_capital,
     ingest_signals_df,
     simulate_step,
@@ -31,52 +49,147 @@ from src.features_ml import retrain_model
 from src.performance import compute_all_metrics, persist_metrics_row
 
 
-def setup_logging():
-    logging.basicConfig(
-        level=getattr(logging, LOG_LEVEL.upper(), logging.INFO),
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+# ---------------------------------------------------------------------------
+# Logging setup
+# ---------------------------------------------------------------------------
+
+def setup_logging() -> None:
+    """Configure root logger with console and rotating file handlers."""
+    ensure_directories()
+    level = getattr(logging, LOG_LEVEL.upper(), logging.INFO)
+
+    root = logging.getLogger()
+    root.setLevel(level)
+
+    # Console handler.
+    console = logging.StreamHandler(sys.stdout)
+    console.setLevel(level)
+    console.setFormatter(
+        logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
     )
+    root.addHandler(console)
+
+    # Rotating file handler (5 MB per file, 3 backups).
+    log_path = LOG_DIR / "scheduler.log"
+    try:
+        file_handler = RotatingFileHandler(
+            str(log_path),
+            maxBytes=5 * 1024 * 1024,
+            backupCount=3,
+            encoding="utf-8",
+        )
+        file_handler.setLevel(level)
+        file_handler.setFormatter(
+            logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+        )
+        root.addHandler(file_handler)
+    except Exception as exc:
+        root.warning("Could not create log file {}: {}".format(log_path, exc))
 
 
-def is_nse_session_open(now=None) -> bool:
-    """Return True during regular NSE cash session (09:00–16:00 IST, Mon–Fri)."""
-    now = now or datetime.now(tz=IST)
+# ---------------------------------------------------------------------------
+# Market hours and holiday awareness
+# ---------------------------------------------------------------------------
+
+def is_market_open() -> bool:
+    """
+    Return True during regular NSE cash session.
+
+    Checks:
+      - Weekday (Mon-Fri).
+      - Not an NSE holiday.
+      - Between 09:00 and 16:00 IST.
+    """
+    now = datetime.now(tz=IST)
+    # Weekend check.
     if now.weekday() >= 5:
         return False
-    t = now.timetz().replace(tzinfo=None) if now.tzinfo else now.time()
-    open_t = dtime(9, 0)
-    close_t = dtime(16, 0)
-    return open_t <= t < close_t
+    # Holiday check.
+    today_str = now.strftime("%Y-%m-%d")
+    if today_str in NSE_HOLIDAYS:
+        return False
+    # Time window check.
+    market_open = now.replace(hour=9, minute=0, second=0, microsecond=0)
+    market_close = now.replace(hour=16, minute=0, second=0, microsecond=0)
+    return market_open <= now <= market_close
 
+
+def is_near_market_close() -> bool:
+    """Return True if within 5 minutes of market close (15:55-16:00 IST)."""
+    now = datetime.now(tz=IST)
+    close_warn = now.replace(hour=15, minute=55, second=0, microsecond=0)
+    close_time = now.replace(hour=16, minute=0, second=0, microsecond=0)
+    return close_warn <= now <= close_time
+
+
+# ---------------------------------------------------------------------------
+# Scheduler lock (prevents duplicate executions)
+# ---------------------------------------------------------------------------
+
+def acquire_lock() -> bool:
+    """
+    Acquire a file-based lock to prevent duplicate scheduler runs.
+
+    Returns True if the lock was acquired, False if another instance holds it.
+    """
+    if LOCK_FILE.exists():
+        # Check if the lock is stale (older than 15 minutes).
+        try:
+            lock_age = time.time() - LOCK_FILE.stat().st_mtime
+            if lock_age < 900:  # 15 minutes
+                return False
+            # Stale lock; remove and re-acquire.
+            LOCK_FILE.unlink(missing_ok=True)
+        except Exception:
+            return False
+
+    try:
+        LOCK_FILE.write_text(
+            str(os.getpid()), encoding="utf-8"
+        )
+        return True
+    except Exception:
+        return False
+
+
+def release_lock() -> None:
+    """Release the file-based scheduler lock."""
+    try:
+        LOCK_FILE.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------------------------
+# State helpers
+# ---------------------------------------------------------------------------
 
 def _get_state(key: str, default: str = "") -> str:
-    import sqlite3
-
-    from src.config import DB_PATH
-
-    with sqlite3.connect(str(DB_PATH)) as c:
-        cur = c.execute("SELECT value FROM state WHERE key=?", (key,))
-        row = cur.fetchone()
-        return str(row[0]) if row and row[0] is not None else default
+    """Read a value from the state table."""
+    conn = get_connection()
+    cur = conn.execute("SELECT value FROM state WHERE key=?", (key,))
+    row = cur.fetchone()
+    return str(row[0]) if row and row[0] is not None else default
 
 
-def _set_state(key: str, value: str):
-    import sqlite3
-
-    from src.config import DB_PATH
-
-    with sqlite3.connect(str(DB_PATH)) as c:
-        c.execute(
+def _set_state(key: str, value: str) -> None:
+    """Write a value to the state table."""
+    from src.db import atomic
+    with atomic() as conn:
+        conn.execute(
             """
             INSERT INTO state(key, value) VALUES(?,?)
             ON CONFLICT(key) DO UPDATE SET value=excluded.value
             """,
             (key, value),
         )
-        c.commit()
 
 
-def maybe_send_daily_summary():
+# ---------------------------------------------------------------------------
+# Daily summary (once per day)
+# ---------------------------------------------------------------------------
+
+def maybe_send_daily_summary() -> None:
     """Once per calendar day (IST), send Telegram summary after first run past open."""
     today = datetime.now(tz=IST).strftime("%Y-%m-%d")
     last = _get_state("last_daily_summary_ymd", "")
@@ -88,66 +201,136 @@ def maybe_send_daily_summary():
     _set_state("last_daily_summary_ymd", today)
 
 
-def run_pipeline_cycle(prefer_sheet: bool = True):
+# ---------------------------------------------------------------------------
+# Pipeline cycle
+# ---------------------------------------------------------------------------
+
+def run_pipeline_cycle(prefer_sheet: bool = True) -> None:
     """Single end-to-end cycle (intended to run about every minute)."""
+    log = logging.getLogger(__name__)
     ensure_directories()
     ensure_database()
+
     df = fetch_signals_safe(prefer_sheet=prefer_sheet)
     ingest_signals_df(df)
     create_trades_for_validated_signals()
     simulate_step()
+
+    # Force close active positions near market close.
+    if is_near_market_close():
+        closed = force_close_eod()
+        if closed:
+            log.info("EOD forced closure: {} trades closed".format(closed))
+
     metrics = compute_all_metrics(INITIAL_CAPITAL)
     persist_metrics_row(metrics)
     maybe_send_daily_summary()
-    logging.getLogger(__name__).info(
-        "Cycle done: win_rate={:.2%} pf={:.2f} mdd={:.2%}".format(
+
+    log.info(
+        "Cycle done: win_rate={:.2%} pf={:.2f} mdd={:.2%} trades={}".format(
             metrics["win_rate"],
             metrics["profit_factor"],
             metrics["max_drawdown_pct"],
+            metrics["total_trades"],
         )
     )
 
 
-def main():
-    from dotenv import load_dotenv
+# ---------------------------------------------------------------------------
+# Entry points
+# ---------------------------------------------------------------------------
 
-    load_dotenv(ROOT / ".env")
-    setup_logging()
+def main_loop() -> None:
+    """Continuous scheduler loop for local or cloud VM deployment."""
     log = logging.getLogger(__name__)
-    ensure_directories()
-    ensure_database()
-    if not Path(MODEL_PATH).is_file():
-        log.info("No RF model found; training bootstrap model")
-        retrain_model()
-    log.info("Scheduler started; NSE open window 09:00–16:00 IST")
 
-    def _job():
-        try:
-            if is_nse_session_open():
-                prefer = os.environ.get("USE_GOOGLE_SHEET", "1").strip() == "1"
-                run_pipeline_cycle(prefer_sheet=prefer)
-            else:
-                log.debug("Outside NSE hours; scheduler tick skipped")
-        except Exception as exc:
-            log.error("Pipeline cycle error: {}".format(exc), exc_info=True)
+    if not acquire_lock():
+        log.error("Another scheduler instance is running. Exiting.")
+        raise SystemExit(1)
 
-    schedule.every(1).minutes.do(_job)
-    while True:
-        schedule.run_pending()
-        time.sleep(1)
+    try:
+        log.info("Scheduler started; NSE open window 09:00-16:00 IST")
+
+        def _job() -> None:
+            try:
+                if is_market_open():
+                    prefer = os.environ.get("USE_GOOGLE_SHEET", "1").strip() == "1"
+                    run_pipeline_cycle(prefer_sheet=prefer)
+                else:
+                    log.debug("Outside NSE hours; scheduler tick skipped")
+            except Exception as exc:
+                log.error("Pipeline cycle error: {}".format(exc), exc_info=True)
+
+        schedule.every(5).minutes.do(_job)
+        while True:
+            schedule.run_pending()
+            time.sleep(1)
+    finally:
+        release_lock()
+
+
+def main_once() -> None:
+    """Single-run mode for GitHub Actions / cron."""
+    log = logging.getLogger(__name__)
+
+    if not acquire_lock():
+        log.warning("Another scheduler instance is running. Exiting.")
+        raise SystemExit(0)
+
+    try:
+        if is_market_open():
+            prefer = os.environ.get("USE_GOOGLE_SHEET", "1").strip() == "1"
+            run_pipeline_cycle(prefer_sheet=prefer)
+        else:
+            log.info("Market is closed; --once cycle skipped.")
+    finally:
+        release_lock()
+
+
+def main_retrain() -> None:
+    """Force model retrain and exit."""
+    log = logging.getLogger(__name__)
+    log.info("Forcing model retrain...")
+    retrain_model()
+    log.info("Retrain complete.")
 
 
 if __name__ == "__main__":
-    from dotenv import load_dotenv
+    try:
+        from dotenv import load_dotenv
+        load_dotenv(ROOT / ".env")
+    except ImportError:
+        pass
 
-    load_dotenv(ROOT / ".env")
-    if len(sys.argv) > 1 and sys.argv[1] == "--once":
-        setup_logging()
-        ensure_directories()
-        ensure_database()
-        if not Path(MODEL_PATH).is_file():
-            retrain_model()
-        prefer = os.environ.get("USE_GOOGLE_SHEET", "1").strip() == "1"
-        run_pipeline_cycle(prefer_sheet=prefer)
-        raise SystemExit(0)
-    main()
+    parser = argparse.ArgumentParser(
+        description="AI Intraday Trading Tester Scheduler"
+    )
+    parser.add_argument(
+        "--once",
+        action="store_true",
+        help="Run a single pipeline cycle and exit (for CI/cron).",
+    )
+    parser.add_argument(
+        "--retrain",
+        action="store_true",
+        help="Force ML model retrain and exit.",
+    )
+    args = parser.parse_args()
+
+    setup_logging()
+    ensure_directories()
+    ensure_database()
+
+    # Ensure model exists.
+    if not Path(MODEL_PATH).is_file() and not args.retrain:
+        logging.getLogger(__name__).info(
+            "No RF model found; training bootstrap model"
+        )
+        retrain_model()
+
+    if args.retrain:
+        main_retrain()
+    elif args.once:
+        main_once()
+    else:
+        main_loop()

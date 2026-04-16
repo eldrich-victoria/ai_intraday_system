@@ -1,230 +1,328 @@
 # AI Intraday Trading Tester System
 
-## Overview
+> **Paper-only** research harness for validating intraday trading signals on the NSE using machine learning, with automated execution via GitHub Actions.
 
-This project is a **paper-only** pipeline that ingests intraday-style signals (for example from a Google Sheet of NSE names), enriches them with technical features, scores them with a **Random Forest** classifier trained under **TimeSeriesSplit**, simulates **dummy trades** with explicit costs and position sizing, persists results in **SQLite**, and exposes **Streamlit** analytics plus optional **Telegram** alerts. It is designed for **local** use or **Google Colab** using free, open-source components.
+[![CI](https://github.com/YOUR_USERNAME/ai_intraday_system/actions/workflows/trading.yml/badge.svg)](https://github.com/YOUR_USERNAME/ai_intraday_system/actions)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-**Compliance:** This software does not place orders, does not connect to brokers, and is **not** investment advice. Validate any vendor “accuracy” claims independently. Follow SEBI norms for research and advertising; use this only as an internal research harness.
+> **Disclaimer:** This software does not place real orders, does not connect to any broker, and is **not** investment advice. It is an educational paper-trading simulation only. Validate any vendor "accuracy" claims independently. Follow SEBI norms for research and advertising. Past performance does not guarantee future results.
 
-## Architecture (text)
+---
 
-```
-Google Sheet (optional, gspread)
-        → fetch / fallback mock CSV
-        → SQLite (signals, trades, performance_metrics)
-        → yfinance NSE prices (.NS) + short TTL cache
-        → pandas-ta features → Random Forest probability
-        → Paper simulator (pending → active → closed)
-        → Metrics (win rate, PF, Sharpe, drawdown, …)
-        → Streamlit dashboard + Telegram (optional)
-        → scheduler.py loop (~60s) during NSE cash session (IST)
-```
-
-NSE regular session assumed: **Monday–Friday, 09:00–16:00 IST** (scheduler only runs the heavy pipeline inside this window).
-
-## Repository layout
+## Architecture
 
 ```
-ai_intraday_trading_system/
+┌─────────────────────────────────────────────────────────────────────┐
+│                        scheduler.py                                 │
+│  (--once for CI/cron  |  continuous loop for local/VM)             │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│  ┌──────────────┐    ┌──────────────┐    ┌──────────────────────┐  │
+│  │ fetch_sheet   │───▶│ dummy_trader  │───▶│ performance          │  │
+│  │ (Google Sheet │    │ (paper sim   │    │ (metrics, equity,    │  │
+│  │  or CSV)      │    │  + risk mgmt)│    │  Sharpe, drawdown)   │  │
+│  └──────┬───────┘    └──────┬───────┘    └──────────┬───────────┘  │
+│         │                   │                        │              │
+│  ┌──────▼───────┐    ┌──────▼───────┐    ┌──────────▼───────────┐  │
+│  │ market_data   │    │ features_ml  │    │ alerts               │  │
+│  │ (yfinance     │    │ (pandas-ta + │    │ (Telegram bot)       │  │
+│  │  + cache)     │    │  RF Pipeline)│    └──────────────────────┘  │
+│  └──────────────┘    └──────────────┘                               │
+│                                                                     │
+│  ┌──────────────────────────────────────────────────────────────┐   │
+│  │                    db.py (SQLite + WAL)                       │   │
+│  │  signals │ trades │ performance_metrics │ state               │   │
+│  └──────────────────────────────────────────────────────────────┘   │
+│                                                                     │
+│  ┌──────────────────────────────────────────────────────────────┐   │
+│  │               dashboard.py (Streamlit)                       │   │
+│  └──────────────────────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+**NSE Session:** Monday–Friday, 09:00–16:00 IST (with holiday awareness).
+
+---
+
+## Repository Layout
+
+```
+ai_intraday_system/
 ├── src/
-│   ├── config.py
-│   ├── fetch_sheet.py
-│   ├── market_data.py
-│   ├── features_ml.py
-│   ├── dummy_trader.py
-│   ├── performance.py
-│   ├── alerts.py
-│   └── dashboard.py
-├── data/              # trades.db created at runtime
-├── models/            # rf_model.pkl after training
-├── scheduler.py
+│   ├── __init__.py
+│   ├── config.py          # Centralised configuration
+│   ├── db.py              # SQLite connection factory, schema, indexes
+│   ├── retry.py           # Exponential backoff decorator
+│   ├── fetch_sheet.py     # Google Sheets / CSV signal ingestion
+│   ├── market_data.py     # yfinance price data with caching
+│   ├── features_ml.py     # Technical indicators + RF Pipeline
+│   ├── dummy_trader.py    # Paper trade simulation engine
+│   ├── performance.py     # Metrics computation
+│   ├── alerts.py          # Telegram notifications
+│   └── dashboard.py       # Streamlit dashboard
+├── tests/
+│   ├── conftest.py        # Shared fixtures (DB isolation, mocks)
+│   ├── test_config.py
+│   ├── test_db.py
+│   ├── test_fetch_sheet.py
+│   ├── test_market_data.py
+│   ├── test_features_ml.py
+│   ├── test_dummy_trader.py
+│   ├── test_performance.py
+│   ├── test_alerts.py
+│   ├── test_scheduler.py
+│   └── test_integration.py
+├── data/                  # trades.db (runtime), mock_signals.csv
+├── models/                # rf_model.pkl (runtime)
+├── logs/                  # scheduler.log (runtime)
+├── .github/workflows/
+│   └── trading.yml        # GitHub Actions CI/CD
+├── scheduler.py           # Main orchestrator
 ├── requirements.txt
-├── README.md
-├── .env
-└── data/mock_signals.csv   # offline fallback
+├── Dockerfile
+├── .env.example
+├── .gitignore
+├── CHANGELOG.md
+├── LICENSE
+└── README.md
 ```
+
+---
 
 ## Prerequisites
 
-- Python **3.10+**
+- **Python 3.10+**
 - Internet access for `yfinance` (and Google APIs if using Sheets)
-- Optional: Google Cloud **service account** JSON for Sheets
+- Optional: Google Cloud **service account** JSON for Sheets integration
+- Optional: Telegram bot for alerts
 
-## Setup
+---
 
-1. Create and activate a virtual environment (recommended).
+## Quick Start
 
-   ```bash
-   python -m venv .venv
-   .venv\Scripts\activate
-   ```
-
-2. Install dependencies:
-
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-3. Copy `.env` and fill secrets (or edit the provided file in place for local use only):
-
-   - `BOT_TOKEN`, `CHAT_ID` — from Telegram BotFather (optional).
-   - `GOOGLE_SERVICE_ACCOUNT_JSON` — absolute path to service account JSON (optional).
-   - `USE_GOOGLE_SHEET=0` forces mock CSV + yfinance only (good for first run).
-
-4. **Train / refresh the Random Forest** (creates `models/rf_model.pkl`):
-
-   ```bash
-   python -m src.features_ml
-   ```
-
-   The scheduler also trains automatically if the model file is missing.
-
-## Google Sheets API (service account)
-
-1. In [Google Cloud Console](https://console.cloud.google.com/), create a project, enable **Google Sheets API** and **Google Drive API**.
-2. Create a **service account**, download the JSON key.
-3. Set `GOOGLE_SERVICE_ACCOUNT_JSON` in `.env` to the full path of that file.
-4. **Share your spreadsheet** with the service account email (Viewer is enough) — same sheet as in `GOOGLE_SHEET_URL`.
-5. Expected columns (headers can vary slightly; mapping is normalized in code):
-
-   - Symbol, Signal (BUY/SELL), Buy Price, Stop Loss, Target, Timestamp
-
-If the sheet is unreachable, the system **falls back** to `data/mock_signals.csv` so the pipeline keeps running.
-
-## Run the scheduler
-
-**Continuous loop** (wakes every ~60s; runs pipeline only during NSE hours):
+### 1. Clone and set up
 
 ```bash
-python scheduler.py
+git clone https://github.com/YOUR_USERNAME/ai_intraday_system.git
+cd ai_intraday_system
+python -m venv .venv
+
+# Windows
+.venv\Scripts\activate
+
+# Linux / macOS
+source .venv/bin/activate
+
+pip install -r requirements.txt
 ```
 
-**Single cycle** (useful for tests):
+### 2. Configure environment
 
 ```bash
-python scheduler.py --once
+cp .env.example .env
+# Edit .env with your values (Telegram bot, Google credentials, etc.)
 ```
 
-### Cron (Linux / macOS)
-
-Run every minute during sessions (example runs only if your wrapper checks time, or rely on the internal sleep):
-
-```cron
-* 9-15 * * 1-5 cd /path/to/ai_intraday_trading_system && . .venv/bin/activate && python scheduler.py --once
-```
-
-Adjust hours if you use a long-lived `python scheduler.py` process instead.
-
-### Windows Task Scheduler
-
-1. Create Task → **Triggers**: Daily, repeat every **1 minute** for **7 hours**, limited to weekdays (or one trigger per weekday).
-2. **Action**: Start a program  
-   - Program: `C:\path\to\.venv\Scripts\python.exe`  
-   - Arguments: `scheduler.py --once`  
-   - Start in: `d:\ai_intraday_trading_system`
-3. Alternatively start `python scheduler.py` once at 09:00 IST and let it loop (align machine timezone or run on a server in IST).
-
-## Streamlit dashboard
-
-From the project root:
-
-```bash
-streamlit run src/dashboard.py
-```
-
-Open the printed local URL. Use **Refresh data now** or wait for the ~30s cache TTL. Charts use **matplotlib** (equity and drawdown).
-
-### Expose with ngrok (Colab or remote)
-
-1. Install [ngrok](https://ngrok.com/) and authenticate.
-2. Run Streamlit on port 8501 (default).
-3. In another terminal: `ngrok http 8501` and use the HTTPS URL shown.
-
-**Colab sketch:**
-
-```python
-!pip install -r requirements.txt
-# upload project or clone repo, then:
-get_ipython().system_raw("streamlit run src/dashboard.py &")
-get_ipython().system_raw("ngrok http 8501")
-```
-
-Use Colab’s ngrok/pyngrok snippets if you prefer a Python tunnel.
-
-## Telegram bot
-
-1. Talk to [@BotFather](https://t.me/BotFather), create a bot, copy the token → `BOT_TOKEN`.
-2. Send a message to your bot, then visit  
-   `https://api.telegram.org/bot<BOT_TOKEN>/getUpdates`  
-   and read `message.chat.id` → `CHAT_ID`.
-3. Set both in `.env`. Alerts fire on simulated **entry**, **exit**, and **once-per-day** summary (first cycle that day while the scheduler runs).
-
-## Machine learning validation
-
-- Features: RSI(14), MACD(12,26,9), ATR(14), SMA/EMA(20), short returns, volume z-score.
-- **Random Forest** with **TimeSeriesSplit** cross-validation (logged), final fit on full training matrix.
-- **Execution gate:** dummy trades are only created when `ml_confidence >= 0.7` (configurable via `ML_CONFIDENCE_THRESHOLD` in environment if you extend `config.py`).
-
-Retrain manually:
+### 3. Train the ML model
 
 ```bash
 python -m src.features_ml
 ```
 
-`xgboost` is listed for optional extensions; the default path is **Random Forest** only.
+The scheduler also trains automatically if the model file is missing.
 
-## Paper trading rules (implemented)
+### 4. Run the scheduler
 
-- **Costs:** ₹**20** brokerage per **closed** round-trip (subtracted from net P&amp;L once on exit).
-- **Risk:** ~**1%** of current virtual capital per trade vs. entry–stop distance (see `_position_size` in `dummy_trader.py`), capped by `MAX_POSITION_PCT_CAPITAL`.
-- **Lifecycle:** Pending (wait for fill) → Active → Closed at target or stop (single-price proxy using last quote when intraday OHLC is unavailable).
+```bash
+# Continuous loop (local / cloud VM):
+python scheduler.py
 
-## Success criteria (reporting)
+# Single cycle (CI / cron):
+python scheduler.py --once
 
-The dashboard and `performance_metrics` table record whether:
+# Force model retrain:
+python scheduler.py --retrain
+```
 
-- Win rate **> 60%** (after costs),
-- Profit factor **> 1.5**,
-- Max drawdown **< 10%**,
+### 5. Launch the dashboard
 
-all hold simultaneously (`success_gate`).
+```bash
+streamlit run src/dashboard.py
+```
+
+---
+
+## Environment Variables
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `BOT_TOKEN` | No | _(empty)_ | Telegram bot token from @BotFather |
+| `CHAT_ID` | No | _(empty)_ | Telegram chat ID for alerts |
+| `GOOGLE_SERVICE_ACCOUNT_JSON` | No | _(empty)_ | Path to SA JSON file OR inline JSON string |
+| `GOOGLE_SHEET_URL` | No | _(sample)_ | URL of the Google Sheet with signals |
+| `USE_GOOGLE_SHEET` | No | `0` | `1` to use Sheets, `0` for mock CSV |
+| `INITIAL_CAPITAL` | No | `100000` | Starting virtual capital (INR) |
+| `RISK_PER_TRADE_PCT` | No | `0.01` | Risk per trade as fraction of capital |
+| `BROKERAGE_PER_TRADE_INR` | No | `40` | Round-trip brokerage (₹20/leg) |
+| `SLIPPAGE_PCT` | No | `0.0005` | Slippage as fraction of price (0.05%) |
+| `ML_CONFIDENCE_THRESHOLD` | No | `0.7` | Min ML confidence for signal validation |
+| `MAX_OPEN_POSITIONS` | No | `5` | Max concurrent open positions |
+| `RF_N_ESTIMATORS` | No | `200` | Random Forest tree count |
+| `LOG_LEVEL` | No | `INFO` | Logging level (DEBUG/INFO/WARNING/ERROR) |
+
+---
+
+## GitHub Actions Deployment
+
+### Setting up secrets
+
+In your GitHub repository, go to **Settings → Secrets and variables → Actions** and add:
+
+| Secret Name | Value |
+|------------|-------|
+| `BOT_TOKEN` | Your Telegram bot token |
+| `CHAT_ID` | Your Telegram chat ID |
+| `GOOGLE_SERVICE_ACCOUNT_JSON` | The full JSON content of your service account key |
+
+### How it works
+
+The workflow (`.github/workflows/trading.yml`) runs every 5 minutes during NSE trading hours (03:30–10:30 UTC = 09:00–16:00 IST, weekdays only):
+
+1. **Lint** — `ruff check .`
+2. **Test** — `pytest tests/ -v`
+3. **Run** — `python scheduler.py --once`
+
+The SQLite database and ML model are **cached** between runs using GitHub Actions artifact caching.
+
+### Manual trigger
+
+You can also trigger the workflow manually via the GitHub Actions UI (workflow_dispatch).
+
+---
+
+## Google Sheets Integration
+
+1. In [Google Cloud Console](https://console.cloud.google.com/), create a project and enable **Google Sheets API** + **Google Drive API**.
+2. Create a **service account** and download the JSON key.
+3. Set `GOOGLE_SERVICE_ACCOUNT_JSON` in `.env` (file path) or GitHub Secrets (inline JSON).
+4. **Share your spreadsheet** with the service account email (Viewer is sufficient).
+5. Expected columns: `Symbol`, `Signal` (BUY/SELL), `Buy Price`, `Stop Loss`, `Target`, `Timestamp`.
+
+If the sheet is unreachable, the system **falls back** to `data/mock_signals.csv`.
+
+---
+
+## Telegram Alerts
+
+1. Create a bot via [@BotFather](https://t.me/BotFather) → copy the token to `BOT_TOKEN`.
+2. Send a message to your bot, then visit `https://api.telegram.org/bot<TOKEN>/getUpdates` to get `CHAT_ID`.
+3. Alerts fire on: **entry**, **exit**, and **once-per-day summary**.
+
+All Telegram calls include exponential backoff retry (3 attempts).
+
+---
+
+## Paper Trading Rules
+
+| Parameter | Value | Description |
+|-----------|-------|-------------|
+| Brokerage | ₹40 round-trip | ₹20 entry + ₹20 exit |
+| Risk | 1% of capital | Per trade vs. entry–stop distance |
+| Position sizing | Integer shares | `math.floor()` for NSE compliance |
+| Slippage | 0.05% | Configurable adverse price impact |
+| Max positions | 5 | Concurrent open positions cap |
+| EOD closure | Automatic | All positions squared off at 15:55 IST |
+
+---
+
+## Machine Learning
+
+- **Features**: RSI(14), MACD(12,26,9), ATR(14), SMA/EMA(20), 1-day & 5-day returns, volume z-score.
+- **Model**: RandomForest wrapped in `sklearn.Pipeline` with `StandardScaler`.
+- **Validation**: `TimeSeriesSplit` cross-validation with accuracy logging.
+- **Warning**: Logs alert if mean CV accuracy drops below 55%.
+- **Gate**: Trades only created when `ml_confidence >= 0.7` (configurable).
+
+---
 
 ## Testing
 
 ```bash
-pip install pytest
-pytest tests/test_performance.py -q
+# Run all tests:
+pytest tests/ -v
+
+# Run with coverage:
+pytest tests/ -v --cov=src --cov-report=term-missing
 ```
 
-Mock signals: edit `data/mock_signals.csv`. Set `USE_GOOGLE_SHEET=0` to avoid Google APIs.
+Tests use temporary SQLite databases (via `tmp_path`) and mock environment variables — no real API calls are made.
 
-## GitHub practices
+---
 
-- Do **not** commit live `BOT_TOKEN`, service-account JSON, or private sheets.
-- Keep `.env` out of public repos (use `.env.example` with blanks for sharing).
-- Track `requirements.txt` and lock major versions in production if needed.
+## Docker
 
-## Example `.env`
+```bash
+# Build:
+docker build -t ai-intraday-tester .
 
-```env
-BOT_TOKEN=
-CHAT_ID=
-GOOGLE_SERVICE_ACCOUNT_JSON=D:\secrets\service_account.json
-GOOGLE_SHEET_URL=https://docs.google.com/spreadsheets/d/1mw5tL2q98s-TcmLfb2U_uFKKQZA33WFd-GynZA0_XaU/edit
-USE_GOOGLE_SHEET=1
-INITIAL_CAPITAL=100000
-ML_CONFIDENCE_THRESHOLD=0.7
-LOG_LEVEL=INFO
+# Run single cycle:
+docker run --env-file .env \
+  -v $(pwd)/data:/app/data \
+  -v $(pwd)/models:/app/models \
+  ai-intraday-tester
+
+# Run continuous loop:
+docker run --env-file .env \
+  -v $(pwd)/data:/app/data \
+  -v $(pwd)/models:/app/models \
+  ai-intraday-tester python scheduler.py
+
+# Run dashboard:
+docker run --env-file .env \
+  -v $(pwd)/data:/app/data \
+  -p 8501:8501 \
+  ai-intraday-tester streamlit run src/dashboard.py --server.port 8501
 ```
 
-## Future enhancements
+---
 
-- Intrabar OHLC from a free tick/minute provider for cleaner fill/exit realism.
-- Walk-forward backtests separate from live paper loop.
-- Optional **XGBoost** ensemble and calibrated probabilities.
-- Postgres instead of SQLite for multi-user dashboards.
-- Stricter SEBI-aligned disclosures in the UI for any public demo.
+## Security Best Practices
+
+- **Never** commit `.env`, service account JSON, or real tokens to version control.
+- Use `.env.example` as a template; keep `.env` local only.
+- For CI/CD, use GitHub Actions **secrets** (encrypted at rest).
+- The `.gitignore` excludes `*.json`, `*.db`, `*.pkl`, `.env`, and logs.
+- Rotate any credentials that were previously exposed.
+
+---
+
+## Troubleshooting
+
+| Issue | Solution |
+|-------|----------|
+| `ModuleNotFoundError: pandas_ta` | `pip install pandas-ta>=0.3.14b` |
+| `FileNotFoundError: GOOGLE_SERVICE_ACCOUNT_JSON` | Set the env var to a valid file path or inline JSON |
+| `Market is closed` on `--once` | Expected — the scheduler only runs during NSE hours |
+| `Another scheduler instance is running` | Delete `scheduler.lock` and retry |
+| `TimeSeriesSplit` errors | Insufficient data — ensure yfinance returns data or use mock CSV |
+| Dashboard doesn't refresh | Install `streamlit-autorefresh`: `pip install streamlit-autorefresh` |
+| DB locked errors | Enable WAL mode (default in v2.0.0) or reduce concurrent access |
+
+---
+
+## Success Criteria (Reporting)
+
+The dashboard and `performance_metrics` table track whether **all** of these hold simultaneously:
+
+- Win rate **> 60%** (after costs)
+- Profit factor **> 1.5**
+- Max drawdown **< 10%**
+
+Displayed as `success_gate`: PASS or FAIL.
+
+---
 
 ## License
 
-Use and modify freely for research; verify compliance with data vendors (Google, Yahoo) and Indian regulations before any production or client-facing use.
+[MIT](LICENSE) — use and modify freely for research. Verify compliance with data vendors (Google, Yahoo) and Indian regulations before any production or client-facing use.

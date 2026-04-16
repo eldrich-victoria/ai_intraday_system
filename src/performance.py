@@ -3,38 +3,32 @@
 
 import logging
 import math
-import sqlite3
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 import pandas as pd
 
 from src.config import (
     COMPLIANCE_NOTE,
-    DB_PATH,
     IST,
     TARGET_MAX_DRAWDOWN_PCT,
     TARGET_PROFIT_FACTOR,
     TARGET_WIN_RATE,
 )
-from src.dummy_trader import ensure_database
+from src.db import atomic, ensure_database, get_connection
 
 logger = logging.getLogger(__name__)
-
-
-def _conn() -> sqlite3.Connection:
-    return sqlite3.connect(str(DB_PATH), check_same_thread=False)
 
 
 def closed_trades_dataframe() -> pd.DataFrame:
     """Load closed trades for analytics."""
     ensure_database()
-    with _conn() as c:
-        df = pd.read_sql(
-            "SELECT * FROM trades WHERE status='closed' ORDER BY exit_time ASC",
-            c,
-        )
+    conn = get_connection()
+    df = pd.read_sql(
+        "SELECT * FROM trades WHERE status='closed' ORDER BY exit_time ASC",
+        conn,
+    )
     return df
 
 
@@ -176,16 +170,16 @@ def compute_all_metrics(
     sides = df["side"].astype(str).tolist()
     entries = df["entry_price"].astype(float).values
     exits = df["exit_price"].astype(float).values
-    with _conn() as c:
-        aux = pd.read_sql(
-            """
-            SELECT t.id, s.stop_loss, s.target
-            FROM trades t JOIN signals s ON s.id = t.signal_id
-            WHERE t.status='closed'
-            ORDER BY t.exit_time ASC
-            """,
-            c,
-        )
+    conn = get_connection()
+    aux = pd.read_sql(
+        """
+        SELECT t.id, s.stop_loss, s.target
+        FROM trades t JOIN signals s ON s.id = t.signal_id
+        WHERE t.status='closed'
+        ORDER BY t.exit_time ASC
+        """,
+        conn,
+    )
     stops = aux["stop_loss"].astype(float).values
     targets = aux["target"].astype(float).values
     avg_rr = average_risk_reward(entries, exits, sides, stops, targets)
@@ -210,11 +204,11 @@ def compute_all_metrics(
     }
 
 
-def persist_metrics_row(metrics: Dict[str, Any]):
+def persist_metrics_row(metrics: Dict[str, Any]) -> None:
     """Insert a snapshot row into performance_metrics."""
     ensure_database()
-    with _conn() as c:
-        c.execute(
+    with atomic() as conn:
+        conn.execute(
             """
             INSERT INTO performance_metrics(
                 computed_at, win_rate, total_trades, net_pnl, profit_factor,
@@ -236,21 +230,22 @@ def persist_metrics_row(metrics: Dict[str, Any]):
                 COMPLIANCE_NOTE,
             ),
         )
-        c.commit()
 
 
 def latest_metrics() -> Optional[Dict[str, Any]]:
     """Most recent persisted metrics row."""
     ensure_database()
-    with _conn() as c:
-        c.row_factory = sqlite3.Row
-        cur = c.execute(
-            "SELECT * FROM performance_metrics ORDER BY id DESC LIMIT 1"
-        )
-        row = cur.fetchone()
-        if not row:
-            return None
-        return dict(row)
+    import sqlite3
+    conn = get_connection()
+    conn.row_factory = sqlite3.Row
+    cur = conn.execute(
+        "SELECT * FROM performance_metrics ORDER BY id DESC LIMIT 1"
+    )
+    row = cur.fetchone()
+    conn.row_factory = None  # Reset for other callers.
+    if not row:
+        return None
+    return dict(row)
 
 
 def equity_series_for_plot(initial_capital: float) -> pd.DataFrame:

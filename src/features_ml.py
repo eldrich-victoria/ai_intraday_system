@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
-"""Feature engineering (pandas-ta) and Random Forest signal validation."""
+"""Feature engineering (ta) and Random Forest signal validation."""
 
 import logging
 import os
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import joblib
@@ -10,10 +11,12 @@ import numpy as np
 import pandas as pd
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import TimeSeriesSplit
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
 
 from src.config import (
     LOOKBACK_BARS,
-    MODEL_PATH,
+    MODELS_DIR,
     RF_N_ESTIMATORS,
     RF_RANDOM_STATE,
     TS_SPLIT_SPLITS,
@@ -24,7 +27,7 @@ from src.market_data import bars_for_features, get_ohlcv_history, nse_ticker, sy
 logger = logging.getLogger(__name__)
 
 try:
-    import pandas_ta as ta
+    import ta
 except ImportError:
     ta = None
 
@@ -42,16 +45,27 @@ FEATURE_COLUMNS = [
     "vol_z_20",
 ]
 
+# Minimum mean CV accuracy threshold.  Below this we log a warning.
+_CV_ACCURACY_WARN_THRESHOLD = 0.55
 
-def _ensure_ta():
+
+def _ensure_ta() -> None:
+    """Raise if ta is not installed."""
     if ta is None:
-        raise RuntimeError("pandas_ta is required for feature engineering.")
+        raise RuntimeError("ta library is required for feature engineering.")
 
+def _get_model_path(symbol: str = "GLOBAL") -> Path:
+    ensure_directories()
+    # Normalize slashes or special characters
+    safe_sym = str(symbol).replace("^", "").replace("/", "").replace("\\", "")
+    return MODELS_DIR / f"rf_model_{safe_sym}.pkl"
 
 def compute_features(ohlcv: pd.DataFrame) -> pd.DataFrame:
     """
     Compute RSI(14), MACD(12,26,9), ATR(14), SMA/EMA(20) and auxiliary columns.
-    Forward-fills missing values; drops rows with insufficient history.
+
+    Uses ``.dropna()`` instead of ``.bfill()`` to prevent look-ahead bias /
+    data leakage in the training pipeline.
     """
     _ensure_ta()
     if ohlcv is None or ohlcv.empty:
@@ -70,7 +84,7 @@ def compute_features(ohlcv: pd.DataFrame) -> pd.DataFrame:
                     }
                 )
             else:
-                logger.warning("OHLCV missing column: {}".format(col))
+                logger.warning(f"OHLCV missing column: {col}")
                 return pd.DataFrame()
     df = df.sort_index()
     close = df["close"]
@@ -78,22 +92,19 @@ def compute_features(ohlcv: pd.DataFrame) -> pd.DataFrame:
     low = df["low"]
     volume = df["volume"].fillna(0)
 
-    rsi = ta.rsi(close, length=14)
-    macd_df = ta.macd(close, fast=12, slow=26, signal=9)
-    atr = ta.atr(high=high, low=low, close=close, length=14)
-    sma20 = ta.sma(close, length=20)
-    ema20 = ta.ema(close, length=20)
+    rsi = ta.momentum.rsi(close, window=14)
+    macd = ta.trend.macd(close, window_slow=26, window_fast=12)
+    macd_signal = ta.trend.macd_signal(close, window_slow=26, window_fast=12, window_sign=9)
+    macd_hist = ta.trend.macd_diff(close, window_slow=26, window_fast=12, window_sign=9)
+    atr = ta.volatility.average_true_range(high=high, low=low, close=close, window=14)
+    sma20 = ta.trend.sma_indicator(close, window=20)
+    ema20 = ta.trend.ema_indicator(close, window=20)
 
     out = pd.DataFrame(index=df.index)
     out["rsi_14"] = rsi
-    if macd_df is not None and macd_df.shape[1] >= 3:
-        out["macd"] = macd_df.iloc[:, 0]
-        out["macd_signal"] = macd_df.iloc[:, 1]
-        out["macd_hist"] = macd_df.iloc[:, 2]
-    else:
-        out["macd"] = np.nan
-        out["macd_signal"] = np.nan
-        out["macd_hist"] = np.nan
+    out["macd"] = macd
+    out["macd_signal"] = macd_signal
+    out["macd_hist"] = macd_hist
     out["atr_14"] = atr
     out["sma_20"] = sma20
     out["ema_20"] = ema20
@@ -103,7 +114,9 @@ def compute_features(ohlcv: pd.DataFrame) -> pd.DataFrame:
     vol_std = volume.rolling(20).std().replace(0, np.nan)
     out["vol_z_20"] = (volume - vol_mean) / vol_std
 
-    out = out.replace([np.inf, -np.inf], np.nan).ffill().bfill()
+    # Replace infinities with NaN, then DROP rows with any NaN.
+    # This prevents data leakage that would occur with .bfill().
+    out = out.replace([np.inf, -np.inf], np.nan).dropna()
     return out
 
 
@@ -130,26 +143,48 @@ def _build_training_matrix(
     return X, yy
 
 
+def _build_pipeline() -> Pipeline:
+    """
+    Build a scikit-learn Pipeline with StandardScaler and RandomForest.
+    """
+    return Pipeline([
+        ("scaler", StandardScaler()),
+        ("clf", RandomForestClassifier(
+            n_estimators=RF_N_ESTIMATORS,
+            random_state=RF_RANDOM_STATE,
+            class_weight="balanced_subsample",
+            n_jobs=-1,
+        )),
+    ])
+
+
 def train_random_forest_and_save(
     symbols: Optional[List[str]] = None,
 ) -> str:
     """
-    Train RandomForest with TimeSeriesSplit on concatenated histories.
-    Saves model to MODEL_PATH. Returns path written.
+    Train RandomForest per-symbol and globally.
     """
     ensure_directories()
     symbols = symbols or ["RELIANCE", "TCS", "INFY", "HDFCBANK", "ICICIBANK"]
     parts_x: List[pd.DataFrame] = []
     parts_y: List[pd.Series] = []
+    
     for sym in symbols:
         X, y = _build_training_matrix(sym)
         if len(X) > 30:
             parts_x.append(X)
             parts_y.append(y)
+            # Train symbol-specific model
+            pipe = _build_pipeline()
+            pipe.fit(X, y)
+            joblib.dump({"model": pipe, "features": FEATURE_COLUMNS}, _get_model_path(sym))
+            logger.info(f"Saved symbol model for {sym}")
+
     if not parts_x:
         X, y = _build_training_matrix("SYNTH")
         parts_x.append(X)
         parts_y.append(y)
+
     X_all = pd.concat(parts_x, axis=0, ignore_index=True)
     y_all = pd.concat(parts_y, axis=0, ignore_index=True)
     n = min(len(X_all), len(y_all))
@@ -163,43 +198,45 @@ def train_random_forest_and_save(
     n_splits = min(n_splits, max(2, len(X_all) - 1))
     if len(X_all) <= n_splits + 2:
         n_splits = max(2, min(3, len(X_all) - 2))
+
+    pipe = _build_pipeline()
+
     if n_splits < 2 or len(X_all) < 10:
-        clf = RandomForestClassifier(
-            n_estimators=RF_N_ESTIMATORS,
-            random_state=RF_RANDOM_STATE,
-            class_weight="balanced_subsample",
-            n_jobs=-1,
-        )
-        clf.fit(X_all, y_all)
-        joblib.dump({"model": clf, "features": FEATURE_COLUMNS}, MODEL_PATH)
-        logger.info("Saved RandomForest model to {} (small sample, no CV)".format(MODEL_PATH))
-        return str(MODEL_PATH)
+        pipe.fit(X_all, y_all)
+        path = _get_model_path("GLOBAL")
+        joblib.dump({"model": pipe, "features": FEATURE_COLUMNS}, path)
+        logger.info("Saved global model (small sample)")
+        return str(path)
+
     tscv = TimeSeriesSplit(n_splits=n_splits)
-    clf = RandomForestClassifier(
-        n_estimators=RF_N_ESTIMATORS,
-        random_state=RF_RANDOM_STATE,
-        class_weight="balanced_subsample",
-        n_jobs=-1,
-    )
-    cv_scores = []
+    cv_scores: List[float] = []
     for train_idx, test_idx in tscv.split(X_all):
-        clf.fit(X_all.iloc[train_idx], y_all.iloc[train_idx])
+        pipe.fit(X_all.iloc[train_idx], y_all.iloc[train_idx])
         cv_scores.append(
-            float(clf.score(X_all.iloc[test_idx], y_all.iloc[test_idx]))
+            float(pipe.score(X_all.iloc[test_idx], y_all.iloc[test_idx]))
         )
-    logger.info("TimeSeriesSplit CV accuracy folds: {}".format(cv_scores))
-    clf.fit(X_all, y_all)
 
-    joblib.dump({"model": clf, "features": FEATURE_COLUMNS}, MODEL_PATH)
-    logger.info("Saved RandomForest model to {}".format(MODEL_PATH))
-    return str(MODEL_PATH)
+    mean_cv = float(np.mean(cv_scores))
+    logger.info(f"TimeSeriesSplit CV accuracy (mean={mean_cv:.4f})")
+    if mean_cv < _CV_ACCURACY_WARN_THRESHOLD:
+        logger.warning(
+            f"Mean CV accuracy {mean_cv:.4f} is below threshold {_CV_ACCURACY_WARN_THRESHOLD}. "
+            "Model quality may be poor."
+        )
+
+    pipe.fit(X_all, y_all)
+    path = _get_model_path("GLOBAL")
+    joblib.dump({"model": pipe, "features": FEATURE_COLUMNS}, path)
+    logger.info("Saved global model")
+    return str(path)
 
 
-def load_model() -> Optional[Dict[str, Any]]:
+def load_model(symbol: str = "GLOBAL") -> Optional[Dict[str, Any]]:
     """Load persisted model bundle."""
-    if not os.path.isfile(MODEL_PATH):
+    path = _get_model_path(symbol)
+    if not os.path.isfile(path):
         return None
-    return joblib.load(MODEL_PATH)
+    return joblib.load(path)
 
 
 def latest_feature_vector(symbol: str) -> Optional[pd.Series]:
@@ -220,14 +257,20 @@ def signal_confidence(
     model_bundle: Optional[Dict[str, Any]] = None,
 ) -> float:
     """
-    Return confidence in [0,1]. Uses RandomForest proba of class 1 (bullish proxy).
-    BUY uses p; SELL uses (1 - p).
+    Return confidence in [0,1]. fallback symbol -> global.
     """
-    bundle = model_bundle or load_model()
+    if model_bundle is not None:
+        bundle = model_bundle
+    else:
+        bundle = load_model(symbol)
+        if bundle is None:
+            bundle = load_model("GLOBAL")
+
     if bundle is None:
         logger.warning("No model on disk; run retrain. Using neutral 0.5")
         return 0.5
-    clf = bundle["model"]
+        
+    pipe = bundle["model"]
     feats_order: List[str] = bundle.get("features", FEATURE_COLUMNS)
     vec = latest_feature_vector(symbol)
     if vec is None:
@@ -243,8 +286,7 @@ def signal_confidence(
             fv = 0.0
         row_dict[k] = fv
     x_df = pd.DataFrame([row_dict], columns=feats_order)
-    proba = clf.predict_proba(x_df)[0]
-    # class order: sklearn sorts by label - assume binary 0,1
+    proba = pipe.predict_proba(x_df)[0]
     p_up = float(proba[-1]) if len(proba) > 1 else float(proba[0])
     side = str(signal_side).upper().strip()
     if side == "SELL":
@@ -260,4 +302,4 @@ def retrain_model(symbols: Optional[List[str]] = None) -> str:
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     path = retrain_model()
-    print("Model written to {}".format(path))
+    print(f"Global model written to {path}")

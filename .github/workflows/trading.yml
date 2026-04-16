@@ -1,0 +1,118 @@
+name: AI Intraday Trading Tester
+
+on:
+  schedule:
+    # NSE trading hours: 09:00-16:00 IST = 03:30-10:30 UTC.
+    # Run every 5 minutes during this window on weekdays.
+    - cron: "*/5 3-10 * * 1-5"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # -------------------------------------------------------------------
+  # Lint and test (runs on every trigger)
+  # -------------------------------------------------------------------
+  lint-and-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest ruff
+
+      - name: Lint with ruff
+        run: ruff check . --output-format=github
+
+      - name: Run unit tests
+        run: pytest tests/ -v --tb=short -q
+
+  # -------------------------------------------------------------------
+  # Trading cycle (runs only during NSE hours)
+  # -------------------------------------------------------------------
+  run-trading-cycle:
+    needs: lint-and-test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # Restore cached artifacts (DB + models) from previous runs.
+      - name: Restore cached artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            data/trades.db
+            models/
+          key: trading-artifacts-${{ runner.os }}-${{ hashFiles('**/requirements.txt') }}-${{ github.run_number }}
+          restore-keys: |
+            trading-artifacts-${{ runner.os }}-${{ hashFiles('**/requirements.txt') }}-
+            trading-artifacts-${{ runner.os }}-
+
+      - name: Create directories
+        run: |
+          mkdir -p data models logs
+
+      # Write Google credentials from secret (inline JSON).
+      - name: Create Google credentials file
+        if: env.GOOGLE_SERVICE_ACCOUNT_JSON != ''
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+        run: |
+          echo "${GOOGLE_SERVICE_ACCOUNT_JSON}" > service_account.json
+
+      - name: Run single pipeline cycle
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          CHAT_ID: ${{ secrets.CHAT_ID }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: service_account.json
+          USE_GOOGLE_SHEET: "1"
+          INITIAL_CAPITAL: "100000"
+          LOG_LEVEL: "INFO"
+        run: |
+          python scheduler.py --once
+
+      # Cache artifacts for next run.
+      - name: Save cached artifacts
+        uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: |
+            data/trades.db
+            models/
+          key: trading-artifacts-${{ runner.os }}-${{ hashFiles('**/requirements.txt') }}-${{ github.run_number }}
+
+      # Upload models for debugging and audit (30-day retention).
+      - name: Upload ML Models Artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ml-models-${{ github.run_id }}
+          path: models/
+          retention-days: 30
