@@ -1,7 +1,6 @@
 # -*- coding: utf-8 -*-
 """Tests for src.alerts module."""
 
-import os
 
 
 def test_send_telegram_disabled_without_creds():

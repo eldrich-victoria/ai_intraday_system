@@ -95,7 +95,7 @@ def average_risk_reward(
         e = float(entries[i])
         x = float(exits[i])
         sl = float(stops[i])
-        tg = float(targets[i])
+        _ = float(targets[i])
         side = str(sides[i]).upper()
         if side == "BUY":
             risk = max(e - sl, 1e-6)

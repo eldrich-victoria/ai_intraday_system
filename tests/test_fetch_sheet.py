@@ -1,8 +1,6 @@
 # -*- coding: utf-8 -*-
 """Tests for src.fetch_sheet module."""
 
-import pandas as pd
-import pytest
 
 
 def test_normalize_column_name():

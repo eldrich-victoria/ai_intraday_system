@@ -1,7 +1,6 @@
 # -*- coding: utf-8 -*-
 """Tests for src.db module — schema, WAL, indexes, transactions."""
 
-import sqlite3
 
 
 def test_ensure_database_creates_tables(initialized_db):

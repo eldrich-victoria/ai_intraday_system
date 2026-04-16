@@ -1,7 +1,6 @@
 # -*- coding: utf-8 -*-
 """Tests for src.config module."""
 
-from pathlib import Path
 from zoneinfo import ZoneInfo
 
 

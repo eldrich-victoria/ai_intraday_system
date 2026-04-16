@@ -4,7 +4,7 @@
 import logging
 import math
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 import pandas as pd
 
@@ -18,7 +18,6 @@ from src.config import (
     ML_CONFIDENCE_THRESHOLD,
     RISK_PER_TRADE_PCT,
     SLIPPAGE_PCT,
-    ensure_directories,
 )
 from src.db import atomic, ensure_database, get_connection
 from src import alerts

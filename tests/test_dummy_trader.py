@@ -1,10 +1,8 @@
 # -*- coding: utf-8 -*-
 """Tests for src.dummy_trader module."""
 
-import math
 
 import pandas as pd
-import pytest
 
 
 def test_position_size_returns_integer():
@@ -92,7 +90,7 @@ def test_ingest_signals_df_dedup(initialized_db, sample_signals_df):
     """Duplicate row_hash values should not be inserted twice."""
     from src.dummy_trader import ingest_signals_df
 
-    count1 = ingest_signals_df(sample_signals_df)
+    _ = ingest_signals_df(sample_signals_df)
     count2 = ingest_signals_df(sample_signals_df)  # Same data again.
     assert count2 == 0, "Duplicates should not be inserted"
 

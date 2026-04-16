@@ -1,10 +1,8 @@
 # -*- coding: utf-8 -*-
 """Tests for src.performance module — pure metric helpers and DB-backed analytics."""
 
-import math
 
 import numpy as np
-import pytest
 
 from src.performance import (
     build_equity_curve,

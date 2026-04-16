@@ -15,14 +15,13 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
 from src.config import (
-    LOOKBACK_BARS,
     MODELS_DIR,
     RF_N_ESTIMATORS,
     RF_RANDOM_STATE,
     TS_SPLIT_SPLITS,
     ensure_directories,
 )
-from src.market_data import bars_for_features, get_ohlcv_history, nse_ticker, synthetic_ohlcv
+from src.market_data import bars_for_features, get_ohlcv_history, synthetic_ohlcv
 
 logger = logging.getLogger(__name__)
 

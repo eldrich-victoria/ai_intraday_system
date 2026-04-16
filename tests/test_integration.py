@@ -57,7 +57,7 @@ def test_pipeline_idempotency(initialized_db, sample_signals_df):
     """Running the pipeline twice with same signals should not duplicate."""
     from src.dummy_trader import ingest_signals_df
 
-    count1 = ingest_signals_df(sample_signals_df)
+    _ = ingest_signals_df(sample_signals_df)
     count2 = ingest_signals_df(sample_signals_df)
     assert count2 == 0, "Second ingestion should not insert duplicates"
 

@@ -17,13 +17,10 @@ import time
 from datetime import datetime
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from zoneinfo import ZoneInfo
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import schedule
-
-ROOT = Path(__file__).resolve().parent
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
 
 from src import alerts
 from src.config import (
@@ -40,13 +37,14 @@ from src.db import ensure_database, get_connection
 from src.dummy_trader import (
     create_trades_for_validated_signals,
     force_close_eod,
-    get_virtual_capital,
     ingest_signals_df,
     simulate_step,
 )
 from src.fetch_sheet import fetch_signals_safe
 from src.features_ml import retrain_model
 from src.performance import compute_all_metrics, persist_metrics_row
+
+ROOT = Path(__file__).resolve().parent
 
 
 # ---------------------------------------------------------------------------

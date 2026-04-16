@@ -1,11 +1,9 @@
 # -*- coding: utf-8 -*-
 """Shared pytest fixtures for the AI Intraday Trading Tester test suite."""
 
-import os
 import sys
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 import pytest
 

@@ -8,16 +8,7 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import streamlit as st
 
-ROOT = Path(__file__).resolve().parent.parent
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
-
-try:
-    from dotenv import load_dotenv
-
-    load_dotenv(ROOT / ".env")
-except ImportError:
-    pass
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 try:
     from streamlit_autorefresh import st_autorefresh
@@ -28,6 +19,15 @@ from src.config import COMPLIANCE_NOTE, IST, INITIAL_CAPITAL
 from src.db import ensure_database, get_connection
 from src.dummy_trader import get_virtual_capital
 from src.performance import compute_all_metrics, equity_series_for_plot, latest_metrics
+
+ROOT = Path(__file__).resolve().parent.parent
+
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv(ROOT / ".env")
+except ImportError:
+    pass
 
 
 @st.cache_data(ttl=30.0)
