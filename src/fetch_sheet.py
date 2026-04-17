@@ -1,7 +1,6 @@
 # -*- coding: utf-8 -*-
 """Fetch live trading signals from Google Sheets using gspread (service account)."""
 
-import asyncio
 import hashlib
 import json
 import logging
@@ -31,67 +30,35 @@ _SIGNAL_CACHE: Dict[int, Tuple[float, pd.DataFrame]] = {}
 CACHE_TTL_SECONDS = 30
 
 
-def _normalize_column_name(name: str) -> str:
-    if name is None:
-        return ""
-    key = str(name).strip().lower().replace("_", " ")
-    mapping = {
-        "symbol": "symbol",
-        "signal": "signal",
-        "buy price": "buy_price",
-        "buyprice": "buy_price",
-        "entry": "buy_price",
-        "entry price": "buy_price",
-        "stop loss": "stop_loss",
-        "stoploss": "stop_loss",
-        "sl": "stop_loss",
-        "target": "target",
-        "tgt": "target",
-        "timestamp": "timestamp",
-        "time": "timestamp",
-        "date": "timestamp",
-    }
-    return mapping.get(key, key.replace(" ", "_"))
-
-
-def _row_hash(row: Dict[str, Any]) -> str:
-    parts = [
-        str(row.get("symbol", "")),
-        str(row.get("signal", "")),
-        str(row.get("buy_price", "")),
-        str(row.get("stop_loss", "")),
-        str(row.get("target", "")),
-        str(row.get("timestamp", "")),
-    ]
-    payload = "|".join(parts).encode("utf-8")
-    return hashlib.sha256(payload).hexdigest()
-
-
 def _open_sheet_client():
     import gspread
     from google.oauth2.service_account import Credentials
 
-    raw = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "").strip()
-    if not raw:
-        raise FileNotFoundError(
-            "GOOGLE_SERVICE_ACCOUNT_JSON not set or empty"
-        )
+    creds_val = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "").strip()
+
+    if not creds_val:
+        raise ValueError("GOOGLE_SERVICE_ACCOUNT_JSON is not set")
 
     scopes = [
         "https://www.googleapis.com/auth/spreadsheets.readonly",
         "https://www.googleapis.com/auth/drive.readonly",
     ]
 
-    if os.path.isfile(raw):
-        creds = Credentials.from_service_account_file(raw, scopes=scopes)
-    else:
+    if creds_val.startswith("{"):
+        logger.info("Using service account JSON from environment")
         try:
-            info = json.loads(raw)
-        except (json.JSONDecodeError, TypeError):
+            creds_info = json.loads(creds_val)
+        except json.JSONDecodeError:
+            logger.error("Failed to parse Google Service Account JSON string")
+            raise
+        creds = Credentials.from_service_account_info(creds_info, scopes=scopes)
+    else:
+        logger.info(f"Using service account file path: {creds_val}")
+        if not os.path.isfile(creds_val):
             raise FileNotFoundError(
-                f"GOOGLE_SERVICE_ACCOUNT_JSON is not valid JSON: {raw[:60]}..."
+                f"Credentials file not found at path: {creds_val}"
             )
-        creds = Credentials.from_service_account_info(info, scopes=scopes)
+        creds = Credentials.from_service_account_file(creds_val, scopes=scopes)
 
     return gspread.authorize(creds)
 
@@ -141,73 +108,52 @@ def fetch_signals_from_sheet(
     for raw in rows:
         item: Dict[str, Any] = {}
         for k, v in raw.items():
-            nk = _normalize_column_name(k)
-            if nk:
-                item[nk] = v
-        for req in ("symbol", "signal", "buy_price", "stop_loss", "target"):
-            if req not in item:
-                item[req] = None
-        if "timestamp" not in item or item["timestamp"] in (None, ""):
-            item["timestamp"] = datetime.now(tz=IST).strftime("%Y-%m-%d %H:%M:%S")
-        
+            item[k.strip().lower().replace(" ", "_")] = v
+
+        item["timestamp"] = datetime.now(tz=IST).strftime("%Y-%m-%d %H:%M:%S")
+
         if not validate_signal_row(item):
-            logger.warning(
-                f"Skipping invalid signal row: { {k: item.get(k) for k in ('symbol', 'signal', 'buy_price', 'stop_loss', 'target')} }"
-            )
             continue
-        item["row_hash"] = _row_hash(item)
+
+        item["row_hash"] = hashlib.sha256(str(item).encode()).hexdigest()
         normalized.append(item)
 
-    if not normalized:
-        return pd.DataFrame(columns=OUTPUT_COLUMNS)
-
     df = pd.DataFrame(normalized)
-    for col in ("buy_price", "stop_loss", "target"):
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
-    df["signal"] = df["signal"].astype(str).str.upper().str.strip()
-    df["symbol"] = df["symbol"].astype(str).str.strip().str.upper()
-    df_out = df[[c for c in OUTPUT_COLUMNS if c in df.columns]].copy()
-    
-    _SIGNAL_CACHE[worksheet_index] = (time.time(), df_out)
-    return df_out
+    _SIGNAL_CACHE[worksheet_index] = (time.time(), df)
 
-
-async def fetch_signals_async(worksheet_index: int = 0, use_cache: bool = True) -> pd.DataFrame:
-    """Optional asynchronous fetching wrapper."""
-    return await asyncio.to_thread(fetch_signals_from_sheet, worksheet_index, use_cache)
+    return df
 
 
 def load_mock_signals_csv(path: Optional[str] = None) -> pd.DataFrame:
     p = path or str(MOCK_SIGNALS_PATH)
     if not os.path.isfile(p):
-        logger.warning(f"Mock signals file not found: {p}")
         return pd.DataFrame(columns=OUTPUT_COLUMNS)
+    
     df = pd.read_csv(p)
-    ren = {}
-    for c in df.columns:
-        ren[c] = _normalize_column_name(c)
-    df = df.rename(columns=ren)
-    for col in ("buy_price", "stop_loss", "target"):
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
-    if "timestamp" not in df.columns:
-        df["timestamp"] = datetime.now(tz=IST).strftime("%Y-%m-%d %H:%M:%S")
-    df["signal"] = df["signal"].astype(str).str.upper().str.strip()
-    df["symbol"] = df["symbol"].astype(str).str.strip().str.upper()
-    df["row_hash"] = df.apply(lambda r: _row_hash(r.to_dict()), axis=1)
-    return df[[c for c in OUTPUT_COLUMNS if c in df.columns]]
+    
+    normalized_cols = {}
+    for col in df.columns:
+        normalized_cols[col] = str(col).strip().lower().replace(" ", "_")
+    df.rename(columns=normalized_cols, inplace=True)
+    
+    for req_col in OUTPUT_COLUMNS:
+        if req_col not in df.columns:
+            df[req_col] = None
+            
+    return df
 
 
 def fetch_signals_safe(prefer_sheet: bool = True, use_cache: bool = True) -> pd.DataFrame:
     if prefer_sheet:
+        logger.info("Attempting to fetch signals from Google Sheets")
         try:
             df = fetch_signals_from_sheet(use_cache=use_cache)
-            logger.info(f"Fetched {len(df)} rows from Google Sheet")
+            logger.info(f"Fetched {len(df)} signals from sheet")
             return df
         except Exception as exc:
-            logger.error(
-                f"Sheet fetch failed ({exc}). Falling back to mock CSV.",
-                exc_info=True,
-            )
+            logger.error("Google Sheets fetch FAILED - check credentials")
+            logger.error(f"Full error: {exc}", exc_info=True)
+            raise
+    
+    logger.warning("System is running on mock data")
     return load_mock_signals_csv()
