@@ -131,14 +131,17 @@ def load_mock_signals_csv(path: Optional[str] = None) -> pd.DataFrame:
     
     df = pd.read_csv(p)
     
-    normalized_cols = {}
-    for col in df.columns:
-        normalized_cols[col] = str(col).strip().lower().replace(" ", "_")
-    df.rename(columns=normalized_cols, inplace=True)
+    df.columns = [
+        col.strip().lower().replace(" ", "_")
+        for col in df.columns
+    ]
     
-    for req_col in OUTPUT_COLUMNS:
-        if req_col not in df.columns:
-            df[req_col] = None
+    required_cols = ["symbol", "signal", "buy_price", "stop_loss", "target"]
+    for col in required_cols:
+        if col not in df.columns:
+            df[col] = None
+            
+    logger.info(f"Mock CSV loaded with columns: {df.columns.tolist()}")
             
     return df
 

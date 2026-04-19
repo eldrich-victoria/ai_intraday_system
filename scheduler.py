@@ -267,6 +267,40 @@ def main_loop() -> None:
         release_lock()
 
 
+def run_realtime_loop() -> None:
+    """Bounded loop for simulated real-time execution in CI environments."""
+    log = logging.getLogger(__name__)
+
+    if not acquire_lock():
+        log.warning("Another scheduler instance is running. Exiting.")
+        raise SystemExit(0)
+
+    try:
+        cycles = 5
+        log.info("Realtime loop started")
+        
+        for i in range(cycles):
+            log.info(f"Cycle {i+1}/{cycles} started")
+            
+            if not is_market_open():
+                log.info("Market closed - exiting loop")
+                break
+            
+            try:
+                prefer = os.environ.get("USE_GOOGLE_SHEET", "1").strip() == "1"
+                run_pipeline_cycle(prefer_sheet=prefer)
+            except Exception as exc:
+                log.error("Pipeline cycle error: {}".format(exc), exc_info=True)
+            
+            log.info(f"Cycle {i+1}/{cycles} completed")
+            
+            if i < cycles - 1:
+                log.info("Sleeping for 120 seconds")
+                time.sleep(120)
+    finally:
+        release_lock()
+
+
 def main_once() -> None:
     """Single-run mode for GitHub Actions / cron."""
     log = logging.getLogger(__name__)
@@ -331,4 +365,4 @@ if __name__ == "__main__":
     elif args.once:
         main_once()
     else:
-        main_loop()
+        run_realtime_loop()

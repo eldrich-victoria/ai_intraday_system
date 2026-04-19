@@ -5,8 +5,11 @@ env:
 
 on:
   schedule:
-    # Every 5 minutes during NSE hours (3:30–10:30 UTC ≈ 9:00–16:00 IST)
     - cron: "*/5 3-10 * * 1-5"
+    - cron: "*/7 3-10 * * 1-5"
+    - cron: "*/9 3-10 * * 1-5"
+    - cron: "*/11 3-10 * * 1-5"
+    - cron: "*/13 3-10 * * 1-5"
   workflow_dispatch:
 
 jobs:
@@ -59,14 +62,14 @@ jobs:
       # -------------------------------
       # Run trading system
       # -------------------------------
-      - name: Run single pipeline cycle
+      - name: Run real-time loop pipeline
         env:
           GOOGLE_SERVICE_ACCOUNT_JSON: service_account.json
           GOOGLE_SHEET_URL: ${{ secrets.GOOGLE_SHEET_URL }}
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           CHAT_ID: ${{ secrets.CHAT_ID }}
         run: |
-          python scheduler.py --once
+          python scheduler.py
 
       # -------------------------------
       # Upload models (artifacts)
